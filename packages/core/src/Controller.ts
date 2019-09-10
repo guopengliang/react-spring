@@ -70,6 +70,7 @@ export class Controller<State extends Indexable = any> {
   destroyed = false
   props: CachedProps<State> = {}
   queue: any[] = []
+  changed!: Set<string>
   timestamps: Indexable<number> = {}
   values: State = {} as any
   merged: State = {} as any
@@ -278,6 +279,7 @@ export class Controller<State extends Indexable = any> {
       const attached = keys.filter(key => {
         const payload = c.getPayload(key)
         if (payload) {
+          c.animations[key].idle = false
           each(payload, node => node.done && node.reset(true))
           return true
         }
@@ -410,7 +412,7 @@ export class Controller<State extends Indexable = any> {
     attach,
     ...props
   }: PendingProps<State> & Indexable) {
-    let changed = false
+    let changed = new Set<string>()
 
     // Generalized diffing algorithm
     const diffProp = (keys: string[], value: any, owner: any) => {
@@ -426,10 +428,9 @@ export class Controller<State extends Indexable = any> {
         const oldTimestamp = this.timestamps[keyPath]
         if (is.und(oldTimestamp) || timestamp! >= oldTimestamp) {
           this.timestamps[keyPath] = timestamp!
-          const oldValue = owner[lastKey]
-          if (!isEqual(value, oldValue)) {
-            changed = true
+          if (!isEqual(value, owner[lastKey])) {
             owner[lastKey] = value
+            changed.add(keyPath)
           }
         }
       }
@@ -458,12 +459,8 @@ export class Controller<State extends Indexable = any> {
     if ('reset' in props) this.props.reset = false
     if ('cancel' in props) this.props.cancel = void 0
 
-    return changed
-  }
-
-  // Return true if the given prop was changed by this update
-  private _isModified(props: PendingProps<State>, prop: string) {
-    return this.timestamps[prop] === props.timestamp
+    this.changed = changed
+    return !!changed.size
   }
 
   // Update the animation configs. The given props override any default props.
@@ -481,7 +478,7 @@ export class Controller<State extends Indexable = any> {
     }
 
     let isPrevented = (_: string) => false
-    if (props.cancel && this._isModified(props, 'cancel')) {
+    if (props.cancel && this.changed.has('cancel')) {
       // Stop all animations when `cancel` is true
       if (props.cancel === true) {
         this.stop()
@@ -503,14 +500,14 @@ export class Controller<State extends Indexable = any> {
     // Merge `from` values with `to` values
     this.merged = freeze({ ...from, ...to })
 
-    // True if any animation was updated
-    let changed = false
+    // All changed animations are stored here
+    const changed: string[] = []
 
     // The animations that are starting or restarting
     const started: string[] = []
 
     // Attach when a new "parent" controller exists.
-    const isAttaching = parent && this._isModified(props, 'parent')
+    const isAttaching = parent && this.changed.has('parent')
 
     // Reduces input { key: value } pairs into animation objects
     for (const key in this.merged) {
@@ -535,7 +532,7 @@ export class Controller<State extends Indexable = any> {
       if (!props.reset && !isAttaching && isEqual(goalValue, currValue)) {
         // The animation might be stopped already.
         if (!state.idle) {
-          changed = true
+          changed.push(key)
           this._stopAnimation(key)
         }
         continue
@@ -587,7 +584,7 @@ export class Controller<State extends Indexable = any> {
             continue
           }
           if (immediate) {
-            input.setValue(1, false)
+            input.setValue(1)
           }
         } else {
           // Convert values into Animated nodes (reusing nodes whenever possible)
@@ -616,7 +613,7 @@ export class Controller<State extends Indexable = any> {
             continue
           }
           if (immediate) {
-            animated.setValue!(goalValue, false)
+            animated.setValue!(goalValue)
           }
         }
 
@@ -628,6 +625,7 @@ export class Controller<State extends Indexable = any> {
           callProp(this.props.config, key) ||
           emptyObj
 
+        changed.push(key)
         if (!(immediate || G.skipAnimation)) {
           started.push(key)
         }
@@ -637,7 +635,6 @@ export class Controller<State extends Indexable = any> {
           (parent && parent.getPayload(key)) ||
           toArray(isInterpolated ? 1 : goalValue)
 
-        changed = true
         this.animations[key] = {
           key,
           idle: false,
@@ -661,9 +658,10 @@ export class Controller<State extends Indexable = any> {
       }
     }
 
-    if (changed) {
+    if (changed.length) {
+      this._attach(changed)
+
       if (started.length) {
-        this._attach(started)
         if (is.fun(onStart))
           each(started, key => {
             onStart(this.animations[key] as any)
